@@ -77,7 +77,14 @@ trap(struct trapframe *tf)
             cpuid(), tf->cs, tf->eip);
     lapiceoi();
     break;
-
+ /* case T_PGFLT:
+    if(old_stack_bottom > page_fault_addr && page_fault_addr > old_stack_bottom - PGSIZE){
+      allocuvm(myprov()->pgdir, new_bottom, old_bottom);
+      myproc-> numPages++;
+      cprint("increased stack size");
+      myproc()->pgdir, new_bottom - PGSIZE;
+    }
+*/
   //PAGEBREAK: 13
   default:
     if(myproc() == 0 || (tf->cs&3) == 0){
