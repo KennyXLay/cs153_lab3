@@ -1,0 +1,395 @@
+diff --git a/Makefile b/Makefile
+index 09d790c..a8df47e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -181,6 +181,7 @@ UPROGS=\
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++	_test\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+diff --git a/code.diff b/code.diff
+new file mode 100644
+index 0000000..734ad04
+--- /dev/null
++++ b/code.diff
+@@ -0,0 +1,202 @@
++diff --git a/Makefile b/Makefile
++index 09d790c..a8df47e 100644
++--- a/Makefile
+++++ b/Makefile
++@@ -181,6 +181,7 @@ UPROGS=\
++ 	_usertests\
++ 	_wc\
++ 	_zombie\
+++	_test\
++ 
++ fs.img: mkfs README $(UPROGS)
++ 	./mkfs fs.img README $(UPROGS)
++diff --git a/exec.c b/exec.c
++index b40134f..b421763 100644
++--- a/exec.c
+++++ b/exec.c
++@@ -18,6 +18,7 @@ exec(char *path, char **argv)
++   struct proghdr ph;
++   pde_t *pgdir, *oldpgdir;
++   struct proc *curproc = myproc();
+++  
++ 
++   begin_op();
++ 
++@@ -63,11 +64,15 @@ exec(char *path, char **argv)
++   // Allocate two pages at the next page boundary.
++   // Make the first inaccessible.  Use the second as the user stack.
++   sz = PGROUNDUP(sz);
++-  if((sz = allocuvm(pgdir, sz, sz + 2*PGSIZE)) == 0)
+++  if((allocuvm(pgdir, KERNBASE-1 - 2*PGSIZE, KERNBASE-1)) == 0)
++     goto bad;
++-  clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
+++  clearpteu(pgdir, (char*)(KERNBASE-1 - 2*PGSIZE));
+++  //curproc->numPages = 1;
++   sp = sz;
++ 
+++//  int
+++//  allocuvm(pde_t *pgdir, uint oldsz, uint newsz);
+++
++   // Push argument strings, prepare rest of stack in ustack.
++   for(argc = 0; argv[argc]; argc++) {
++     if(argc >= MAXARG)
++diff --git a/memlayout.h b/memlayout.h
++index d1615f7..3b9314b 100644
++--- a/memlayout.h
+++++ b/memlayout.h
++@@ -7,6 +7,7 @@
++ // Key addresses for address space layout (see kmap in vm.c for layout)
++ #define KERNBASE 0x80000000         // First kernel virtual address
++ #define KERNLINK (KERNBASE+EXTMEM)  // Address where kernel is linked
+++#define stp (KERNBASE - 4)	    // top of stack, right under the kernb
++ 
++ #define V2P(a) (((uint) (a)) - KERNBASE)
++ #define P2V(a) ((void *)(((char *) (a)) + KERNBASE))
++diff --git a/syscall.c b/syscall.c
++index ee85261..6051167 100644
++--- a/syscall.c
+++++ b/syscall.c
++@@ -17,9 +17,9 @@
++ int
++ fetchint(uint addr, int *ip)
++ {
++-  struct proc *curproc = myproc();
+++ //struct proc *curproc = myproc();
++ 
++-  if(addr >= curproc->sz || addr+4 > curproc->sz)
+++  if(addr >= stp || addr+4 > stp)
++     return -1;
++   *ip = *(int*)(addr);
++   return 0;
++@@ -32,12 +32,12 @@ int
++ fetchstr(uint addr, char **pp)
++ {
++   char *s, *ep;
++-  struct proc *curproc = myproc();
+++  //struct proc *curproc = myproc();
++ 
++-  if(addr >= curproc->sz)
+++  if(addr >= stp)
++     return -1;
++   *pp = (char*)addr;
++-  ep = (char*)curproc->sz;
+++  ep = (char*)stp;
++   for(s = *pp; s < ep; s++){
++     if(*s == 0)
++       return s - *pp;
++@@ -59,11 +59,11 @@ int
++ argptr(int n, char **pp, int size)
++ {
++   int i;
++-  struct proc *curproc = myproc();
+++  //struct proc *curproc = myproc();
++  
++   if(argint(n, &i) < 0)
++     return -1;
++-  if(size < 0 || (uint)i >= curproc->sz || (uint)i+size > curproc->sz)
+++  if(size < 0 || (uint)i >= stp || (uint)i+size > stp)
++     return -1;
++   *pp = (char*)i;
++   return 0;
++diff --git a/test.c b/test.c
++new file mode 100644
++index 0000000..9ad4abe
++--- /dev/null
+++++ b/test.c
++@@ -0,0 +1,31 @@
+++#include "types.h"
+++#include "user.h"
+++
+++// Prevent this function from being optimized, which might give it closed form
+++#pragma GCC push_options
+++#pragma GCC optimize ("O0")
+++static int
+++recurse(int n)
+++{
+++   if(n == 0)
+++      return 0;
+++   return n + recurse(n - 1);
+++}
+++#pragma GCC pop_options
+++
+++int
+++main(int argc, char *argv[])
+++{
+++  int n, m;
+++
+++  if(argc != 2){
+++    printf(1, "Usage: %s levels\n", argv[0]);
+++    exit();
+++  } 
+++  
+++  n = atoi(argv[1]);
+++  printf(1, "Lab 3: Recursing %d levels\n", n);
+++  m = recurse(n);
+++  printf(1, "Lab 3: Yielded a value of %d\n", m);
+++  exit();
+++}
++diff --git a/trap.c b/trap.c
++index 41c66eb..49cc1db 100644
++--- a/trap.c
+++++ b/trap.c
++@@ -77,7 +77,14 @@ trap(struct trapframe *tf)
++             cpuid(), tf->cs, tf->eip);
++     lapiceoi();
++     break;
++-
+++ /* case T_PGFLT:
+++    if(old_stack_bottom > page_fault_addr && page_fault_addr > old_stack_bottom - PGSIZE){
+++      allocuvm(myprov()->pgdir, new_bottom, old_bottom);
+++      myproc-> numPages++;
+++      cprint("increased stack size");
+++      myproc()->pgdir, new_bottom - PGSIZE;
+++    }
+++*/
++   //PAGEBREAK: 13
++   default:
++     if(myproc() == 0 || (tf->cs&3) == 0){
++diff --git a/vm.c b/vm.c
++index 7134cff..a36f895 100644
++--- a/vm.c
+++++ b/vm.c
++@@ -224,7 +224,7 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
++   char *mem;
++   uint a;
++ 
++-  if(newsz >= KERNBASE)
+++  if(stp >= KERNBASE) //newsz -> stp
++     return 0;
++   if(newsz < oldsz)
++     return oldsz;
++@@ -331,12 +331,30 @@ copyuvm(pde_t *pgdir, uint sz)
++     flags = PTE_FLAGS(*pte);
++     if((mem = kalloc()) == 0)
++       goto bad;
++-    memmove(mem, (char*)P2V(pa), PGSIZE);
+++    memmove(mem, (char*)P2V(pa), PGSIZE);  //change here i believe.
++     if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
++       kfree(mem);
++       goto bad;
++     }
++   }
+++
+++  for(i = KERNBASE - 1*PGSIZE; i < KERNBASE-1; i += PGSIZE){
+++    cprintf("i: %d\n", i);
+++    if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
+++      panic("copyuvm: pte should exist");
+++    if(!(*pte & PTE_P))
+++      panic("copyuvm: page not present");
+++    pa = PTE_ADDR(*pte);
+++    flags = PTE_FLAGS(*pte);
+++    if((mem = kalloc()) == 0)
+++      goto bad;
+++    memmove(mem, (char *)P2V(pa), PGSIZE);
+++    if(mappages(d, (void *)i, PGSIZE, V2P(mem), flags) < 0){
+++      kfree(mem);
+++      goto bad;
+++    }
+++  }
+++
++   return d;
++ 
++ bad:
+diff --git a/exec.c b/exec.c
+index b40134f..b421763 100644
+--- a/exec.c
++++ b/exec.c
+@@ -18,6 +18,7 @@ exec(char *path, char **argv)
+   struct proghdr ph;
+   pde_t *pgdir, *oldpgdir;
+   struct proc *curproc = myproc();
++  
+ 
+   begin_op();
+ 
+@@ -63,11 +64,15 @@ exec(char *path, char **argv)
+   // Allocate two pages at the next page boundary.
+   // Make the first inaccessible.  Use the second as the user stack.
+   sz = PGROUNDUP(sz);
+-  if((sz = allocuvm(pgdir, sz, sz + 2*PGSIZE)) == 0)
++  if((allocuvm(pgdir, KERNBASE-1 - 2*PGSIZE, KERNBASE-1)) == 0)
+     goto bad;
+-  clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
++  clearpteu(pgdir, (char*)(KERNBASE-1 - 2*PGSIZE));
++  //curproc->numPages = 1;
+   sp = sz;
+ 
++//  int
++//  allocuvm(pde_t *pgdir, uint oldsz, uint newsz);
++
+   // Push argument strings, prepare rest of stack in ustack.
+   for(argc = 0; argv[argc]; argc++) {
+     if(argc >= MAXARG)
+diff --git a/memlayout.h b/memlayout.h
+index d1615f7..3b9314b 100644
+--- a/memlayout.h
++++ b/memlayout.h
+@@ -7,6 +7,7 @@
+ // Key addresses for address space layout (see kmap in vm.c for layout)
+ #define KERNBASE 0x80000000         // First kernel virtual address
+ #define KERNLINK (KERNBASE+EXTMEM)  // Address where kernel is linked
++#define stp (KERNBASE - 4)	    // top of stack, right under the kernb
+ 
+ #define V2P(a) (((uint) (a)) - KERNBASE)
+ #define P2V(a) ((void *)(((char *) (a)) + KERNBASE))
+diff --git a/syscall.c b/syscall.c
+index ee85261..6051167 100644
+--- a/syscall.c
++++ b/syscall.c
+@@ -17,9 +17,9 @@
+ int
+ fetchint(uint addr, int *ip)
+ {
+-  struct proc *curproc = myproc();
++ //struct proc *curproc = myproc();
+ 
+-  if(addr >= curproc->sz || addr+4 > curproc->sz)
++  if(addr >= stp || addr+4 > stp)
+     return -1;
+   *ip = *(int*)(addr);
+   return 0;
+@@ -32,12 +32,12 @@ int
+ fetchstr(uint addr, char **pp)
+ {
+   char *s, *ep;
+-  struct proc *curproc = myproc();
++  //struct proc *curproc = myproc();
+ 
+-  if(addr >= curproc->sz)
++  if(addr >= stp)
+     return -1;
+   *pp = (char*)addr;
+-  ep = (char*)curproc->sz;
++  ep = (char*)stp;
+   for(s = *pp; s < ep; s++){
+     if(*s == 0)
+       return s - *pp;
+@@ -59,11 +59,11 @@ int
+ argptr(int n, char **pp, int size)
+ {
+   int i;
+-  struct proc *curproc = myproc();
++  //struct proc *curproc = myproc();
+  
+   if(argint(n, &i) < 0)
+     return -1;
+-  if(size < 0 || (uint)i >= curproc->sz || (uint)i+size > curproc->sz)
++  if(size < 0 || (uint)i >= stp || (uint)i+size > stp)
+     return -1;
+   *pp = (char*)i;
+   return 0;
+diff --git a/test.c b/test.c
+new file mode 100644
+index 0000000..9ad4abe
+--- /dev/null
++++ b/test.c
+@@ -0,0 +1,31 @@
++#include "types.h"
++#include "user.h"
++
++// Prevent this function from being optimized, which might give it closed form
++#pragma GCC push_options
++#pragma GCC optimize ("O0")
++static int
++recurse(int n)
++{
++   if(n == 0)
++      return 0;
++   return n + recurse(n - 1);
++}
++#pragma GCC pop_options
++
++int
++main(int argc, char *argv[])
++{
++  int n, m;
++
++  if(argc != 2){
++    printf(1, "Usage: %s levels\n", argv[0]);
++    exit();
++  } 
++  
++  n = atoi(argv[1]);
++  printf(1, "Lab 3: Recursing %d levels\n", n);
++  m = recurse(n);
++  printf(1, "Lab 3: Yielded a value of %d\n", m);
++  exit();
++}
+diff --git a/trap.c b/trap.c
+index 41c66eb..4f51827 100644
+--- a/trap.c
++++ b/trap.c
+@@ -77,6 +77,17 @@ trap(struct trapframe *tf)
+             cpuid(), tf->cs, tf->eip);
+     lapiceoi();
+     break;
++  case T_PGFLT:
++ /*   cprintf("pagefault");
++    uint address = rcr2();
++    uint oldBot = stp - (PGSIZE * myproc()->numPages);
++    uint newBot = stp - (PGSIZE * (myproc()numPages + 1));
++    if(oldBot > address && address > oldBot - PGSIZE){
++      allocuvm(myprov()->pgdir, newBot, oldBot);
++      myproc-> numPages++;
++      cprint("increased stack size");
++ */   }
++    break;
+ 
+   //PAGEBREAK: 13
+   default:
+diff --git a/vm.c b/vm.c
+index 7134cff..32317a1 100644
+--- a/vm.c
++++ b/vm.c
+@@ -224,7 +224,7 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
+   char *mem;
+   uint a;
+ 
+-  if(newsz >= KERNBASE)
++  if(stp >= KERNBASE) //newsz -> stp
+     return 0;
+   if(newsz < oldsz)
+     return oldsz;
+@@ -331,12 +331,13 @@ copyuvm(pde_t *pgdir, uint sz)
+     flags = PTE_FLAGS(*pte);
+     if((mem = kalloc()) == 0)
+       goto bad;
+-    memmove(mem, (char*)P2V(pa), PGSIZE);
++    memmove(mem, (char*)P2V(pa), PGSIZE);  //change here i believe.
+     if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
+       kfree(mem);
+       goto bad;
+     }
+   }
++  
+   return d;
+ 
+ bad:
